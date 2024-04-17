@@ -2,6 +2,7 @@
 
 #include <climits>
 #include <string>
+#include <utility>
 
 template <std::size_t N, typename... T> struct typelist_find_helper;
 template <std::size_t N, typename T> struct typelist_find_helper<N, T> {
@@ -75,7 +76,6 @@ template <typename T> struct chain_derived_typelist_container<typelist<T>> {
 };
 
 using char_type = char;
-using key_type = std::string;
 
 constexpr char_type char_type_minium = CHAR_MIN;
 constexpr char_type char_type_maxium = CHAR_MAX;
@@ -93,7 +93,7 @@ template <typename V>
 using levellist =
     typelist<node4<V>, node16<V>, node48<V>, node256<V>, node_type_guard<V>>;
 
-template <typename V, typename Alloc> struct art_tree;
+template <typename K, typename V, typename Alloc> struct art_tree;
 
 template <typename V> struct child_slot {
   char_type c;
@@ -120,68 +120,70 @@ struct node_link_base {
 };
 
 template <typename V> struct node_base : public node_link_base {
-  using mapped_type = V;
-  using value_type = std::pair<const key_type, mapped_type>;
+  using key_type =
+      typename std::remove_const<typename std::tuple_element<0, V>::type>::type;
+  using mapped_type = typename std::tuple_element<1, V>::type;
+  using value_type = V;
 
   node_base() = default;
   virtual ~node_base() = default;
 
   virtual std::size_t node_size() const = 0;
-  virtual node_base<mapped_type> *expand_new(void *art_tree_ptr) = 0;
+  virtual node_base<value_type> *expand_new(void *art_tree_ptr) = 0;
   virtual void dealloc(void *art_tree_ptr) = 0;
 
-  virtual const_child_slot<mapped_type> find_child_impl(char_type c) const = 0;
-  virtual child_slot<mapped_type> find_leq_child(char_type c) = 0;
-  virtual child_slot<mapped_type> find_geq_child(char_type c) = 0;
-  virtual int get_all_children_impl(child_slot<mapped_type> slots[256]) = 0;
-  virtual std::pair<child_slot<mapped_type>, bool>
+  virtual const_child_slot<value_type> find_child_impl(char_type c) const = 0;
+  virtual child_slot<value_type> find_leq_child(char_type c) = 0;
+  virtual child_slot<value_type> find_geq_child(char_type c) = 0;
+  virtual int get_all_children_impl(child_slot<value_type> slots[256]) = 0;
+  virtual std::pair<child_slot<value_type>, bool>
   try_insert_child_impl(char_type c, node_base *node) = 0;
   virtual void erase_child(char_type c) = 0;
 
   bool children_empty() const { return children_size_ == 0; }
 
-  int get_all_children(child_slot<mapped_type> slots[256]) {
+  int get_all_children(child_slot<value_type> slots[256]) {
     if (children_empty()) {
       return 0;
     }
     return get_all_children_impl(slots);
   }
-  const_child_slot<mapped_type> find_child(char_type c) const {
-    const_child_slot<mapped_type> cslot;
+  const_child_slot<value_type> find_child(char_type c) const {
+    const_child_slot<value_type> cslot;
     if (children_empty()) {
       cslot.node = nullptr;
       return cslot;
     }
     return find_child_impl(c);
   }
-  child_slot<mapped_type> find_child(char_type c) {
-    const_child_slot<mapped_type> cslot =
+  child_slot<value_type> find_child(char_type c) {
+    const_child_slot<value_type> cslot =
         const_cast<const node_base *>(this)->find_child(c);
-    child_slot<mapped_type> slot;
+    child_slot<value_type> slot;
     slot.c = cslot.c;
     slot.node = const_cast<node_base **>(cslot.node);
     return slot;
   }
-  child_slot<mapped_type> find_less_child(char_type c) {
-    child_slot<mapped_type> slot;
+  child_slot<value_type> find_less_child(char_type c) {
+    child_slot<value_type> slot;
     if (c == char_type_minium) {
       slot.node = nullptr;
       return slot;
     }
     return find_leq_child(c - 1);
   }
-  child_slot<mapped_type> find_greater_child(char_type c) {
-    child_slot<mapped_type> slot;
+  child_slot<value_type> find_greater_child(char_type c) {
+    child_slot<value_type> slot;
     if (c == char_type_maxium) {
       slot.node = nullptr;
       return slot;
     }
     return find_geq_child(c + 1);
   }
-  child_slot<mapped_type> find_min_child() {
+  child_slot<value_type> find_min_child() {
     return find_geq_child(char_type_minium);
   }
-  child_slot<mapped_type> find_max_child() {
+  child_slot<value_type> find_max_child() {
     return find_leq_child(char_type_maxium);
   }
 
@@ -229,21 +231,46 @@ template <typename V> struct node_base : public node_link_base {
   }
   std::pair<std::size_t, int> compare(const char_type *s,
                                       std::size_t ssize) const {
+    const std::size_t ds = std::min(subfix_size_, ssize);
     std::size_t i = 0;
-    while (i < subfix_size_ && i < ssize) {
-      char_type d = subfix_start_[i] - s[i];
-      if (d != 0) {
-        return {i, static_cast<int>(d)};
-      }
+
+    // loop unfold
+#define DO(n)                                                                  \
+  do {                                                                         \
+    const std::size_t p = i + n;                                               \
+    const char_type d = subfix_start_[p] - s[p];                               \
+    if (d != 0) {                                                              \
+      return {p, static_cast<int>(d)};                                         \
+    }                                                                          \
+                                                                               \
+  } while (0)
+
+    while (i < ds % 8) {
+      DO(0);
       ++i;
     }
-    return {i, subfix_size_ - ssize};
+
+    while (i < ds) {
+      DO(0);
+      DO(1);
+      DO(2);
+      DO(3);
+      DO(4);
+      DO(5);
+      DO(6);
+      DO(7);
+      i += 8;
+    }
+
+#undef DO
+
+    return {ds, subfix_size_ - ssize};
   }
 
   node_base *find_min_data_node() {
     node_base *node = this;
     while (!node->storage_valid_) {
-      child_slot<mapped_type> slot = node->find_min_child();
+      child_slot<value_type> slot = node->find_min_child();
       node = *slot.node;
     }
 
@@ -256,7 +283,7 @@ template <typename V> struct node_base : public node_link_base {
   node_base *find_max_data_node() {
     node_base *node = this;
     while (true) {
-      child_slot<mapped_type> slot = node->find_max_child();
+      child_slot<value_type> slot = node->find_max_child();
       if (slot.node == nullptr) {
         break;
       }
@@ -270,8 +297,8 @@ template <typename V> struct node_base : public node_link_base {
     return node;
   }
 
-  std::pair<child_slot<mapped_type>, bool> try_insert_child(char_type c,
-                                                            node_base *node) {
+  std::pair<child_slot<value_type>, bool> try_insert_child(char_type c,
+                                                           node_base *node) {
     auto r = try_insert_child_impl(c, node);
     if (r.second) {
       node->parent_ = this;
@@ -379,16 +406,17 @@ template <typename V> struct node256 : public node_base<V> {
   constexpr static int max_children_size = 256;
 };
 
-template <typename V, typename Alloc> struct art_tree {
-  using key_type = std::string;
-  using mapped_type = V;
+template <typename K, typename V, typename Alloc> struct art_tree {
+  using key_type = K;
+  using mapped_type = typename std::tuple_element<1, V>::type;
   using value_type = std::pair<const key_type, mapped_type>;
   using allocator_type = Alloc;
 
   template <typename node_type, typename = void>
   struct node_alloca_helper : public node_type {
-    node_base<mapped_type> *expand_new(void *art_tree_ptr) override {
-      art_tree<V, Alloc> *art = static_cast<art_tree<V, Alloc> *>(art_tree_ptr);
+    node_base<value_type> *expand_new(void *art_tree_ptr) override {
+      art_tree<key_type, value_type, Alloc> *art =
+          static_cast<art_tree<key_type, value_type, Alloc> *>(art_tree_ptr);
       return art->template node_new<typename levellist<V>::template get_type<
           levellist<V>::template find<node_type>() + 1>>();
     }
@@ -397,16 +425,17 @@ template <typename V, typename Alloc> struct art_tree {
       using node_alloca_type = typename std::allocator_traits<
           Alloc>::template rebind_alloc<node_alloca_helper<node_type>>;
 
-      art_tree<V, Alloc> *art = static_cast<art_tree<V, Alloc> *>(art_tree_ptr);
+      art_tree<key_type, value_type, Alloc> *art =
+          static_cast<art_tree<key_type, value_type, Alloc> *>(art_tree_ptr);
       node_alloca_helper::~node_alloca_helper();
       art->impl_.node_alloca_type::deallocate(this, 1);
     }
   };
 
   template <typename unused>
-  struct node_alloca_helper<node_type_guard<V>, unused>
-      : public node_type_guard<V> {
-    node_base<mapped_type> *expand_new(void *art_tree_ptr) {
+  struct node_alloca_helper<node_type_guard<value_type>, unused>
+      : public node_type_guard<value_type> {
+    node_base<value_type> *expand_new(void *art_tree_ptr) {
       throw "not implement";
     }
     void dealloc(void *art_tree_ptr) override { throw "not implement"; }
@@ -423,7 +452,7 @@ template <typename V, typename Alloc> struct art_tree {
 
   using node_allocator_traits =
       typename chain_derived_typelist_container<typename type_list_apply<
-          node_alloca_traits_rebind, levellist<mapped_type>>::type>::type;
+          node_alloca_traits_rebind, levellist<value_type>>::type>::type;
 
   art_tree(const allocator_type &alloc = allocator_type()) : impl_(alloc) {}
 
@@ -437,26 +466,26 @@ template <typename V, typename Alloc> struct art_tree {
     ++impl_.node_counter_;
     return node;
   }
-  void node_delete(node_base<mapped_type> *node) {
+  void node_delete(node_base<value_type> *node) {
     if (node->storage_valid_) {
       node->unset_node_value();
     }
     --impl_.node_counter_;
     node->dealloc(static_cast<void *>(this));
   }
-  bool is_root(node_base<mapped_type> *node) { return impl_.root_ == node; }
-  find_result_type<mapped_type>
-  find_last_node(node_base<mapped_type> *start_node, const char_type *subfix,
-                 std::size_t subfix_size) const {
-    find_result_type<mapped_type> result;
+  bool is_root(node_base<value_type> *node) { return impl_.root_ == node; }
+  find_result_type<value_type> find_last_node(node_base<value_type> *start_node,
+                                              const char_type *subfix,
+                                              std::size_t subfix_size) const {
+    find_result_type<value_type> result;
     if (start_node == nullptr) {
       result.node = nullptr;
       return result;
     }
 
     std::size_t cursor = 0;
-    node_base<mapped_type> *node = start_node;
-    child_slot<mapped_type> parent_slot;
+    node_base<value_type> *node = start_node;
+    child_slot<value_type> parent_slot;
     while (true) {
       if (cursor > subfix_size) {
         throw "find overflow";
@@ -464,7 +493,7 @@ template <typename V, typename Alloc> struct art_tree {
 
       auto r = node->compare(subfix + cursor, subfix_size - cursor);
       if (cursor + r.first < subfix_size && r.first == node->subfix_size_) {
-        child_slot<mapped_type> slot =
+        child_slot<value_type> slot =
             node->find_child(subfix[cursor + r.first]);
         if (slot.node != nullptr) {
           // find next child
@@ -507,9 +536,9 @@ template <typename V, typename Alloc> struct art_tree {
     node->prev_->next_ = node->next_;
     node->next_->prev_ = node->prev_;
   }
-  void change_node_parent_child(node_base<mapped_type> *node,
-                                node_base<mapped_type> *oldnode,
-                                node_base<mapped_type> **child_slot) {
+  void change_node_parent_child(node_base<value_type> *node,
+                                node_base<value_type> *oldnode,
+                                node_base<value_type> **child_slot) {
     node->parent_ = oldnode->parent_;
     if (is_root(oldnode)) {
       impl_.root_ = node;
@@ -518,10 +547,10 @@ template <typename V, typename Alloc> struct art_tree {
       node->parent_c_ = oldnode->parent_c_;
     }
   }
-  node_base<mapped_type> *node_expand(node_base<mapped_type> *node) {
-    node_base<mapped_type> *expanded_node =
+  node_base<value_type> *node_expand(node_base<value_type> *node) {
+    node_base<value_type> *expanded_node =
         node->expand_new(static_cast<void *>(this));
-    child_slot<mapped_type> slots[256];
+    child_slot<value_type> slots[256];
     int slot_size = node->get_all_children(slots);
     for (int i = 0; i < slot_size; ++i) {
       expanded_node->try_insert_child(slots[i].c, *slots[i].node);
@@ -534,13 +563,42 @@ template <typename V, typename Alloc> struct art_tree {
     expanded_node->set_node_subfix(node->subfix_start_, node->subfix_size_);
     return expanded_node;
   }
+  void erase_node_with_one_child(node_base<value_type> *node,
+                                 node_base<value_type> **child_slot_ptr) {
+    child_slot<value_type> slot = node->find_min_child();
+    node_base<value_type> *child = *slot.node;
+    key_type new_child_subfix;
+    new_child_subfix.reserve(node->subfix_size_ + 1 + child->subfix_size_);
+    new_child_subfix.append(node->subfix_start_, node->subfix_size_);
+    new_child_subfix.append(1, slot.c);
+    new_child_subfix.append(child->subfix_start_, child->subfix_size_);
+    child->set_node_subfix(new_child_subfix.c_str(), new_child_subfix.size());
 
-  std::pair<node_base<mapped_type> *, bool> insert(const value_type &value) {
+    change_node_parent_child(child, node, child_slot_ptr);
+
+    node_delete(node);
+  }
+
+  std::pair<node_base<value_type> *, bool> find(const key_type &_key) const {
+    const std::size_t key_size = _key.size();
+    const char_type *key = _key.c_str();
+
+    find_result_type<value_type> find_result =
+        find_last_node(impl_.root_, key, key_size);
+    if (find_result.node && find_result.key_cur == key_size &&
+        find_result.node_sub_cur == find_result.node->subfix_size_ &&
+        find_result.node->storage_valid_) {
+      return {find_result.node, true};
+    }
+    return {nullptr, false};
+  }
+
+  std::pair<node_base<value_type> *, bool> insert(const value_type &value) {
     const std::size_t key_size = value.first.size();
     const char_type *key = value.first.c_str();
 
     if (impl_.root_ == nullptr) {
-      impl_.root_ = node_new<node4<mapped_type>>();
+      impl_.root_ = node_new<node4<value_type>>();
       impl_.root_->set_node_value(value);
       impl_.root_->set_node_subfix(key, key_size);
       insert_node_link(impl_.root_, &impl_.dummy_, lower);
@@ -549,9 +607,9 @@ template <typename V, typename Alloc> struct art_tree {
       return {impl_.root_, true};
     }
 
-    const find_result_type<mapped_type> find_result =
+    const find_result_type<value_type> find_result =
         find_last_node(impl_.root_, key, key_size);
-    node_base<mapped_type> *node = find_result.node;
+    node_base<value_type> *node = find_result.node;
     const char_type *subfix = key + find_result.key_cur;
     const std::size_t subfix_size = key_size - find_result.key_cur;
 
@@ -576,8 +634,8 @@ template <typename V, typename Alloc> struct art_tree {
 
     if (find_result.node_sub_cur < node->subfix_size_ && subfix_size > 0) {
       // split node, make parent node and hold this node
-      node_base<mapped_type> *new_parent_node = node_new<node4<mapped_type>>();
-      node_base<mapped_type> *new_child_node = node_new<node4<mapped_type>>();
+      node_base<value_type> *new_parent_node = node_new<node4<value_type>>();
+      node_base<value_type> *new_child_node = node_new<node4<value_type>>();
       new_child_node->set_node_value(value);
 
       new_parent_node->set_node_subfix(node->subfix_start_,
@@ -614,14 +672,14 @@ template <typename V, typename Alloc> struct art_tree {
 
     if (find_result.node_sub_cur == node->subfix_size_ && subfix_size > 0) {
       // append to this node child
-      node_base<mapped_type> *new_node = node_new<node4<mapped_type>>();
+      node_base<value_type> *new_node = node_new<node4<value_type>>();
       new_node->set_node_value(value);
       new_node->set_node_subfix(subfix + 1, subfix_size - 1);
 
     re_insert:
       const auto r1 = node->try_insert_child(subfix[0], new_node);
       if (r1.second) {
-        child_slot<mapped_type> slot;
+        child_slot<value_type> slot;
 
         // first find greater child in this node
         slot = node->find_greater_child(subfix[0]);
@@ -647,7 +705,7 @@ template <typename V, typename Alloc> struct art_tree {
         return {new_node, true};
       } else {
         // node is full, expand it
-        node_base<mapped_type> *expanded_node = node_expand(node);
+        node_base<value_type> *expanded_node = node_expand(node);
         change_node_parent_child(expanded_node, node,
                                  find_result.parent_slot.node);
         node_delete(node);
@@ -659,7 +717,7 @@ template <typename V, typename Alloc> struct art_tree {
 
     if (find_result.node_sub_cur < node->subfix_size_ && subfix_size == 0) {
       // split node, but parent is target node
-      node_base<mapped_type> *new_parent_node = node_new<node4<mapped_type>>();
+      node_base<value_type> *new_parent_node = node_new<node4<value_type>>();
       new_parent_node->set_node_value(value);
 
       new_parent_node->set_node_subfix(node->subfix_start_,
@@ -692,9 +750,9 @@ template <typename V, typename Alloc> struct art_tree {
       return {nullptr, false};
     }
 
-    const find_result_type<mapped_type> find_result =
+    const find_result_type<value_type> find_result =
         find_last_node(impl_.root_, key, key_size);
-    node_base<mapped_type> *node = find_result.node;
+    node_base<value_type> *node = find_result.node;
     const char_type *subfix = key + find_result.key_cur;
     const std::size_t subfix_size = key_size - find_result.key_cur;
 
@@ -703,7 +761,7 @@ template <typename V, typename Alloc> struct art_tree {
       if (node->storage_valid_) {
         return {node, true};
       }
-      node_base<mapped_type> *upper_node =
+      node_base<value_type> *upper_node =
           (*node->find_min_child().node)->find_min_data_node();
       return {upper_node, false};
     }
@@ -711,26 +769,26 @@ template <typename V, typename Alloc> struct art_tree {
     if (find_result.node_sub_cur < node->subfix_size_ && subfix_size > 0) {
       char_type node_key_c = node->subfix_start_[find_result.node_sub_cur];
       if (node_key_c > subfix[0]) {
-        node_base<mapped_type> *upper_node = node->find_min_data_node();
+        node_base<value_type> *upper_node = node->find_min_data_node();
         return {upper_node, false};
       }
-      node_base<mapped_type> *lower_node = node->find_max_data_node();
+      node_base<value_type> *lower_node = node->find_max_data_node();
       return {lower_node->next_, false};
     }
 
     if (find_result.node_sub_cur == node->subfix_size_ && subfix_size > 0) {
-      child_slot<mapped_type> slot;
+      child_slot<value_type> slot;
       // first find greater child in this node
       slot = node->find_greater_child(subfix[0]);
       if (slot.node != nullptr) {
-        node_base<mapped_type> *upper_node = (*slot.node)->find_min_data_node();
+        node_base<value_type> *upper_node = (*slot.node)->find_min_data_node();
         return {upper_node, false};
       }
 
       // second find less child in this node
       slot = node->find_less_child(subfix[0]);
       if (slot.node != nullptr) {
-        node_base<mapped_type> *lower_node = (*slot.node)->find_max_data_node();
+        node_base<value_type> *lower_node = (*slot.node)->find_max_data_node();
         return {lower_node->next_, false};
       }
 
@@ -739,14 +797,14 @@ template <typename V, typename Alloc> struct art_tree {
     }
 
     if (find_result.node_sub_cur < node->subfix_size_ && subfix_size == 0) {
-      node_base<mapped_type> *upper_node = node->find_min_data_node();
+      node_base<value_type> *upper_node = node->find_min_data_node();
       return {upper_node, false};
     }
 
     throw "bad judge";
   }
 
-  void erase(node_base<mapped_type> *node) {
+  void erase(node_base<value_type> *node) {
     if (!node->storage_valid_) {
       throw "erase no data node";
     }
@@ -759,71 +817,47 @@ template <typename V, typename Alloc> struct art_tree {
       return;
     }
 
-  redo:
-    if (is_root(node)) {
+    while (true) {
+      if (is_root(node)) {
+        if (node->children_size_ == 1) {
+          erase_node_with_one_child(node, nullptr);
+          return;
+        }
+
+        // node->children_size_ == 0, erase root node
+        node_delete(node);
+        impl_.root_ = nullptr;
+        return;
+      }
+
+      node_base<value_type> *parent_node = node->parent_;
+      child_slot<value_type> parent_slot =
+          parent_node->find_child(node->parent_c_);
+
+      if (*parent_slot.node != node) {
+        throw "bad found child";
+      }
+
       if (node->children_size_ == 1) {
-        child_slot<mapped_type> slot = node->find_min_child();
-        node_base<mapped_type> *child = *slot.node;
-        key_type new_child_subfix;
-        new_child_subfix.reserve(node->subfix_size_ + 1 + child->subfix_size_);
-        new_child_subfix.append(node->subfix_start_, node->subfix_size_);
-        new_child_subfix.append(1, slot.c);
-        new_child_subfix.append(child->subfix_start_, child->subfix_size_);
-        child->set_node_subfix(new_child_subfix.c_str(),
-                               new_child_subfix.size());
+        erase_node_with_one_child(node, parent_slot.node);
+        return;
+      }
 
-        change_node_parent_child(child, node, slot.node);
-
+      // node->children_size_ == 0
+      if (parent_node->storage_valid_ || parent_node->children_size_ > 2) {
+        // delete child of parent
+        parent_node->erase_child(parent_slot.c);
         node_delete(node);
         return;
       }
 
-      // node->children_size_ == 0, erase root node
-      node_delete(node);
-      impl_.root_ = nullptr;
-      return;
-    }
-
-    node_base<mapped_type> *parent_node = node->parent_;
-    child_slot<mapped_type> parent_slot =
-        parent_node->find_child(node->parent_c_);
-
-    if (*parent_slot.node != node) {
-      throw "bad found child";
-    }
-
-    if (node->children_size_ == 1) {
-      child_slot<mapped_type> slot = node->find_min_child();
-      node_base<mapped_type> *child = *slot.node;
-      key_type new_child_subfix;
-      new_child_subfix.reserve(node->subfix_size_ + 1 + child->subfix_size_);
-      new_child_subfix.append(node->subfix_start_, node->subfix_size_);
-      new_child_subfix.append(1, slot.c);
-      new_child_subfix.append(child->subfix_start_, child->subfix_size_);
-      child->set_node_subfix(new_child_subfix.c_str(), new_child_subfix.size());
-
-      change_node_parent_child(child, node, parent_slot.node);
-
-      node_delete(node);
-      return;
-    }
-
-    // node->children_size_ == 0
-    if (parent_node->storage_valid_ || parent_node->children_size_ > 2) {
-      // delete child of parent
+      // parent_node->children_size_ == 2
       parent_node->erase_child(parent_slot.c);
       node_delete(node);
-      return;
+      // need replace parent to the other child of parent
+      // point parent to node, that mean erase parent
+      node = parent_node;
     }
-
-    // parent_node->children_size_ == 2
-    parent_node->erase_child(parent_slot.c);
-    node_delete(node);
-    // need replace parent to the other child of parent
-    // point parent to node, that mean erase parent
-    node = parent_node;
-
-    goto redo;
   }
 
   void swap(art_tree &other) {
@@ -845,11 +879,12 @@ template <typename V, typename Alloc> struct art_tree {
     std::swap(impl_.dummy_.prev_, other.impl_.dummy_.prev_);
   }
 
-  struct art_tree_impl : public node_allocator_traits {
-    using key_type = std::string;
-    using mapped_type = V;
-    using value_type = std::pair<const key_type, mapped_type>;
+  allocator_type get_allocator() const {
+    return impl_.node_allocator_traits::template node_alloca_helper<
+        node_type_guard<value_type>>;
+  }
 
+  struct art_tree_impl : public node_allocator_traits {
     art_tree_impl(const allocator_type &alloc = allocator_type())
         : root_(nullptr), size_(0), node_counter_(0),
           node_allocator_traits(alloc) {
@@ -860,7 +895,7 @@ template <typename V, typename Alloc> struct art_tree {
     ~art_tree_impl() {}
 
     std::size_t size_;
-    node_base<mapped_type> *root_;
+    node_base<value_type> *root_;
     node_link_base dummy_;
 
     std::size_t node_counter_;
@@ -869,18 +904,20 @@ template <typename V, typename Alloc> struct art_tree {
   art_tree_impl impl_;
 };
 
-template <typename V, typename Alloc = std::allocator<V>> struct art {
-  using key_type = std::string;
-  using mapped_type = V;
+template <typename K, typename T,
+          typename Alloc = std::allocator<std::pair<const K, T>>>
+struct art {
+  using key_type = K;
+  using mapped_type = T;
   using value_type = std::pair<const key_type, mapped_type>;
   using allocator_type = Alloc;
 
   struct iterator {
     value_type &operator*() {
-      return static_cast<node_base<mapped_type> *>(l_)->get_value();
+      return static_cast<node_base<value_type> *>(l_)->get_value();
     }
     value_type *operator->() {
-      return &static_cast<node_base<mapped_type> *>(l_)->get_value();
+      return &static_cast<node_base<value_type> *>(l_)->get_value();
     }
     iterator &operator++() {
       l_ = l_->next_;
@@ -911,10 +948,10 @@ template <typename V, typename Alloc = std::allocator<V>> struct art {
     const_iterator(const iterator iter) : l_(iter.l_) {}
 
     const value_type &operator*() {
-      return static_cast<const node_base<mapped_type> *>(l_)->get_value();
+      return static_cast<const node_base<value_type> *>(l_)->get_value();
     }
     const value_type *operator->() {
-      return &static_cast<const node_base<mapped_type> *>(l_)->get_value();
+      return &static_cast<const node_base<value_type> *>(l_)->get_value();
     }
 
     const_iterator &operator++() {
@@ -1059,14 +1096,14 @@ template <typename V, typename Alloc = std::allocator<V>> struct art {
   iterator erase(iterator pos) {
     iterator next = pos;
     ++next;
-    t_.erase(static_cast<node_base<mapped_type> *>(pos.l_));
+    t_.erase(static_cast<node_base<value_type> *>(pos.l_));
     return next;
   }
   iterator erase(const_iterator pos) {
     iterator next;
     next.l_ = const_cast<node_link_base *>(pos.l_);
     ++next;
-    t_.erase(static_cast<node_base<mapped_type> *>(
+    t_.erase(static_cast<node_base<value_type> *>(
         const_cast<node_link_base *>(pos.l_)));
     return next;
   }
@@ -1108,13 +1145,10 @@ template <typename V, typename Alloc = std::allocator<V>> struct art {
     return iter;
   }
   const_iterator find(const key_type &key) const {
-    const_iterator iter;
-    find_result_type<mapped_type> find_result =
-        t_.find_last_node(t_.impl_.root_, key.c_str(), key.size());
-    if (find_result.node && find_result.key_cur == key.size() &&
-        find_result.node_sub_cur == find_result.node->subfix_size_ &&
-        find_result.node->storage_valid_) {
-      iter.l_ = find_result.node;
+    auto r = t_.find(key);
+    if (r.second) {
+      const_iterator iter;
+      iter.l_ = r.first;
       return iter;
     }
     return end();
@@ -1174,7 +1208,9 @@ template <typename V, typename Alloc = std::allocator<V>> struct art {
     return iter;
   }
 
-  art_tree<mapped_type, allocator_type> t_;
+  allocator_type get_allocator() const { return t_.get_allocator(); }
+
+  art_tree<key_type, value_type, allocator_type> t_;
 };
 
 /******************  node4  *******************/
